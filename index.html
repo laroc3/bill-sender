@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Bill Sender</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0f766e">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <button id="backBtn" class="icon" hidden aria-label="Back">&larr;</button>
+  <h1 id="title">Bill Sender</h1>
+</header>
+<main id="app"></main>
+
+<input id="camIn" type="file" accept="image/*" capture="environment" hidden>
+<input id="fileIn" type="file" accept="image/*,application/pdf" multiple hidden>
+
+<dialog id="billDlg"></dialog>
+<dialog id="sendDlg"></dialog>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script src="config.js"></script>
+<script src="jszip.min.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="app.js"></script>
+</body>
+</html>
