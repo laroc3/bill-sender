@@ -9,6 +9,8 @@ const mb = n => (n / 1e6).toFixed(n < 1e5 ? 2 : 1) + ' MB';
 const inr = n => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(n);
 const pad = n => String(n).padStart(2, '0');
 const safe = s => (String(s).replace(/[^\w.\- ]+/g, '_').trim().slice(0, 80)) || 'file';
+const dispName = b => b.title || b.name;
+const fileNameFor = b => { const ext = (b.name.match(/\.\w+$/) || [''])[0]; return `${pad(b.no)}_${safe(b.title || b.name.replace(/\.\w+$/, ''))}${ext}`; };
 const fmtDate = ms => new Date(ms).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
 
 let toastT;
@@ -104,7 +106,7 @@ async function renderProject() {
       else th = 'PDF';
       return `<li class="card bill" data-action="edit-bill" data-id="${b.id}">
         <div class="thumb">${th}</div>
-        <div class="meta"><b>${esc(b.name)}</b>
+        <div class="meta"><b>${esc(dispName(b))}</b>
           <span class="sub">${esc(b.date || '')}${b.amount != null ? ' · ' + inr(b.amount) : ''} · ${mb(b.size)}</span>
           ${b.note ? `<em>${esc(b.note)}</em>` : ''}</div></li>`;
     }).join('') + '</ul>' : '<p class="empty">No bills yet.<br>Take a photo or add files.</p>'}
@@ -163,42 +165,58 @@ async function addFiles(fileList) {
   if (skipped.length) toast('Skipped: ' + skipped.join('; '));
   else if (added.length) toast(`Added ${added.length} bill${added.length === 1 ? '' : 's'}`);
   await render();
-  if (added.length === 1) openBill(added[0].id);
+  if (added.length) await openBills(added.map(b => b.id));
 }
 
 /* ---------- bill edit dialog ---------- */
-async function openBill(id) {
-  const b = await getOne('bills', id); if (!b) return;
-  const d = $('#billDlg');
-  d.innerHTML = `<form method="dialog" id="billForm">
-    <h2>${esc(b.name)}</h2><div class="sub">${mb(b.size)}</div>
-    <label>Date</label><input type="date" name="date" value="${esc(b.date)}">
-    <label>Amount (₹)</label><input type="number" name="amount" inputmode="decimal" step="0.01" min="0" value="${b.amount ?? ''}">
-    <label>Note</label><textarea name="note" rows="2" maxlength="200">${esc(b.note)}</textarea>
-    <div class="row" style="margin-top:16px">
-      <button class="primary" value="save">Save</button>
-      <button class="secondary" value="cancel" formnovalidate>Cancel</button>
-    </div>
-    <button class="link" type="button" id="delBill">Delete this bill</button></form>`;
-  d.showModal();
-  $('#delBill').onclick = async () => {
-    if (!confirm('Delete this bill?')) return;
-    await del('bills', id);
-    const p = await getOne('projects', b.projectId); p.status = 'draft'; await put('projects', p);
-    d.close(); render();
-  };
-  $('#billForm').onsubmit = async e => {
-    if (e.submitter && e.submitter.value !== 'save') return;
-    const f = new FormData(e.target);
-    b.date = f.get('date') || today();
-    const a = String(f.get('amount')).trim();
-    b.amount = a === '' ? null : Math.round(parseFloat(a) * 100) / 100;
-    if (Number.isNaN(b.amount)) b.amount = null;
-    b.note = String(f.get('note') || '').trim();
-    await put('bills', b);
-    const p = await getOne('projects', b.projectId); p.status = 'draft'; await put('projects', p);
-    render();
-  };
+function openBill(id, pos) {
+  return new Promise(async resolve => {
+    const b = await getOne('bills', id); if (!b) return resolve('gone');
+    const d = $('#billDlg');
+    const multi = pos && pos.n > 1;
+    d.innerHTML = `<form method="dialog" id="billForm">
+      <h2>Bill details${multi ? ` <span class="sub">(${pos.i} of ${pos.n})</span>` : ''}</h2>
+      <div class="sub">${esc(b.name)} · ${mb(b.size)}</div>
+      <label>Bill name</label><input type="text" name="title" maxlength="80" autocomplete="off" placeholder="e.g. Taxi to airport" value="${esc(b.title || '')}" autofocus>
+      <label>Date</label><input type="date" name="date" value="${esc(b.date)}">
+      <label>Amount (₹)</label><input type="number" name="amount" inputmode="decimal" step="0.01" min="0" value="${b.amount ?? ''}">
+      <label>Note</label><textarea name="note" rows="2" maxlength="200">${esc(b.note)}</textarea>
+      <div class="row" style="margin-top:16px">
+        <button class="primary" value="save">Save</button>
+        <button class="secondary" value="cancel" formnovalidate>${multi ? 'Skip' : 'Cancel'}</button>
+      </div>
+      ${multi ? '<button class="link" value="skipall" formnovalidate>Skip the rest</button>' : ''}
+      <button class="link" type="button" id="delBill">Delete this bill</button></form>`;
+    d.onclose = () => resolve(d.returnValue);
+    d.showModal();
+    $('#delBill').onclick = async () => {
+      if (!confirm('Delete this bill?')) return;
+      await del('bills', id);
+      const p = await getOne('projects', b.projectId); p.status = 'draft'; await put('projects', p);
+      d.close('deleted');
+    };
+    $('#billForm').onsubmit = async e => {
+      if (!e.submitter || e.submitter.value !== 'save') return; // cancel / skip: let the dialog close normally
+      e.preventDefault();
+      const f = new FormData(e.target);
+      b.title = String(f.get('title') || '').trim().replace(/\s+/g, ' ');
+      b.date = f.get('date') || today();
+      const a = String(f.get('amount')).trim();
+      b.amount = a === '' ? null : Math.round(parseFloat(a) * 100) / 100;
+      if (Number.isNaN(b.amount)) b.amount = null;
+      b.note = String(f.get('note') || '').trim();
+      await put('bills', b);
+      const p = await getOne('projects', b.projectId); p.status = 'draft'; await put('projects', p);
+      d.close('save');
+    };
+  });
+}
+async function openBills(ids) {
+  for (let k = 0; k < ids.length; k++) {
+    const r = await openBill(ids[k], { i: k + 1, n: ids.length });
+    if (r === 'skipall') break;
+  }
+  render();
 }
 
 /* ---------- Google sign-in (token only, for gmail.send) ---------- */
@@ -225,17 +243,17 @@ function getToken() {
 /* ---------- building & sending the emails ---------- */
 const csvCell = v => { const s = String(v ?? ''); return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
 function buildCsv(part) {
-  const rows = [['No', 'File', 'Date', 'Amount (INR)', 'Note']];
-  part.forEach(b => rows.push([b.no, `${pad(b.no)}_${safe(b.name)}`, b.date, b.amount ?? '', b.note]));
+  const rows = [['No', 'Bill Name', 'Date', 'Amount (INR)', 'Note', 'File']];
+  part.forEach(b => rows.push([b.no, dispName(b), b.date, b.amount ?? '', b.note, fileNameFor(b)]));
   const total = part.reduce((s, b) => s + (b.amount || 0), 0);
-  rows.push(['', 'TOTAL', '', total.toFixed(2), '']);
+  rows.push(['', 'TOTAL', '', total.toFixed(2), '', '']);
   return '﻿' + rows.map(r => r.map(csvCell).join(',')).join('\r\n') + '\r\n';
 }
 const utf8b64 = s => btoa(unescape(encodeURIComponent(s))).replace(/.{1,76}/g, '$&\r\n');
-function blobB64(blob) {
+function blobB64(blob, plain) {
   return new Promise((res, rej) => {
     const f = new FileReader();
-    f.onload = () => res(f.result.slice(f.result.indexOf(',') + 1).replace(/.{1,76}/g, '$&\r\n'));
+    f.onload = () => { const b = f.result.slice(f.result.indexOf(',') + 1); res(plain ? b : b.replace(/.{1,76}/g, '$&\r\n')); };
     f.onerror = () => rej(f.error);
     f.readAsDataURL(blob);
   });
@@ -256,7 +274,7 @@ async function buildMime({ subject, text, zipName, zipBlob }) {
 const stage = (label, p) => Promise.resolve(p).catch(e => { throw new Error(`${label} failed: ${e && e.name ? e.name + ': ' : ''}${e && e.message}`); });
 async function sendPart(project, part, i, n) {
   const zip = new JSZip();
-  part.forEach(b => zip.file(`${pad(b.no)}_${safe(b.name)}`, b.data || b.blob));
+  part.forEach(b => zip.file(fileNameFor(b), b.data || b.blob));
   zip.file('summary.csv', buildCsv(part));
   const zipBlob = await stage('Zipping', zip.generateAsync({ type: 'blob', compression: 'STORE' }));
   const total = part.reduce((s, b) => s + (b.amount || 0), 0);
@@ -264,14 +282,21 @@ async function sendPart(project, part, i, n) {
   const text = [`Project: ${project.name}`, `Email ${i} of ${n}`,
     `Bills in this email: ${part.length}${part.length > 1 ? ` (No. ${part[0].no}-${part[part.length - 1].no})` : ` (No. ${part[0].no})`}`,
     total ? `Total amount in this email: ${inr(total)}` : '', '',
-    ...part.map(b => `${b.no}. ${b.name} | ${b.date}${b.amount != null ? ' | ' + inr(b.amount) : ''}${b.note ? ' | ' + b.note : ''}`),
+    ...part.map(b => `${b.no}. ${dispName(b)} | ${b.date}${b.amount != null ? ' | ' + inr(b.amount) : ''}${b.note ? ' | ' + b.note : ''}`),
     '', 'A summary.csv is included in the attached zip.'].filter((l, k, a) => l !== '' || a[k - 1] !== '').join('\n');
   const zipName = `${safe(project.name).replace(/ /g, '_')}_mail${i}of${n}.zip`;
   const mime = await stage('Building email', buildMime({ subject, text, zipName, zipBlob }));
   const token = await stage('Google sign-in', getToken());
-  const r = await stage('Sending', fetch('https://www.googleapis.com/upload/gmail/v1/users/me/messages/send?uploadType=media', {
-    method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'message/rfc822' }, body: mime
-  }));
+  // Standard JSON endpoint (fully CORS-enabled); the /upload/ endpoint sent the mail but Safari could not read its reply.
+  const raw = (await blobB64(mime, true)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  let r;
+  try {
+    r = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ raw })
+    });
+  } catch (e) {
+    throw new Error('Connection dropped while sending. This email may or may not have gone through: check the Sent folder of ' + C.FROM + ' before tapping Retry.');
+  }
   if (!r.ok) {
     if (r.status === 401) accessToken = null;
     let m = ''; try { m = (await r.json()).error.message; } catch (e) {}
@@ -337,7 +362,7 @@ document.addEventListener('click', async e => {
   if (a === 'open') { view = { id: el.dataset.id }; render(); }
   else if (a === 'cam') $('#camIn').click();
   else if (a === 'files') $('#fileIn').click();
-  else if (a === 'edit-bill') openBill(el.dataset.id);
+  else if (a === 'edit-bill') { await openBill(el.dataset.id); render(); }
   else if (a === 'rename') {
     const p = await getOne('projects', view.id);
     const n = prompt('Project name', p.name);
