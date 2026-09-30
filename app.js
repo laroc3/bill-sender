@@ -45,6 +45,7 @@ const billsOf = pid => run('bills', 'readonly', s => s.index('projectId').getAll
 /* ---------- state ---------- */
 let view = { id: null };
 let urls = [];
+const blobOf = b => b.data ? new Blob([b.data], { type: b.type }) : b.blob; // data = ArrayBuffer (safe on iOS Safari)
 const revoke = () => { urls.forEach(URL.revokeObjectURL); urls = []; };
 
 /* ---------- rendering ---------- */
@@ -99,7 +100,7 @@ async function renderProject() {
     </div>
     ${bills.length ? '<ul class="list">' + bills.map(b => {
       let th;
-      if (b.type.startsWith('image/')) { const u = URL.createObjectURL(b.blob); urls.push(u); th = `<img src="${u}" alt="">`; }
+      if (b.type.startsWith('image/')) { const u = URL.createObjectURL(blobOf(b)); urls.push(u); th = `<img src="${u}" alt="">`; }
       else th = 'PDF';
       return `<li class="card bill" data-action="edit-bill" data-id="${b.id}">
         <div class="thumb">${th}</div>
@@ -148,11 +149,15 @@ async function addFiles(fileList) {
   for (const f of fileList) {
     const isImg = f.type.startsWith('image/'), isPdf = f.type === 'application/pdf';
     if (!isImg && !isPdf) { skipped.push(`${f.name} (unsupported type)`); continue; }
-    const r = isImg ? await compressImage(f) : { blob: f, name: f.name, type: f.type };
-    if (r.blob.size > cap) { skipped.push(`${f.name} (${mb(r.blob.size)} is over the ${mb(cap)} email limit)`); continue; }
-    const bill = { id: uid(), projectId: p.id, name: r.name || 'bill', type: r.type, size: r.blob.size, blob: r.blob,
-      date: today(), amount: null, note: '', created: Date.now() + added.length };
-    await put('bills', bill); added.push(bill);
+    try {
+      const r = isImg ? await compressImage(f) : { blob: f, name: f.name, type: f.type };
+      // Copy into memory now: iOS Safari can lose a stored File/Blob later ("The object can not be found here").
+      const data = await r.blob.arrayBuffer();
+      if (data.byteLength > cap) { skipped.push(`${f.name} (${mb(data.byteLength)} is over the ${mb(cap)} email limit)`); continue; }
+      const bill = { id: uid(), projectId: p.id, name: r.name || 'bill', type: r.type || (isPdf ? 'application/pdf' : 'image/jpeg'),
+        size: data.byteLength, data, date: today(), amount: null, note: '', created: Date.now() + added.length };
+      await put('bills', bill); added.push(bill);
+    } catch (err) { skipped.push(`${f.name} (${err.name}: ${err.message})`); }
   }
   if (added.length) { p.status = 'draft'; await put('projects', p); }
   if (skipped.length) toast('Skipped: ' + skipped.join('; '));
@@ -248,11 +253,12 @@ async function buildMime({ subject, text, zipName, zipBlob }) {
   return new Blob([head, utf8b64(text), attHead, await blobB64(zipBlob), `\r\n--${bd}--\r\n`], { type: 'message/rfc822' });
 }
 
+const stage = (label, p) => Promise.resolve(p).catch(e => { throw new Error(`${label} failed: ${e && e.name ? e.name + ': ' : ''}${e && e.message}`); });
 async function sendPart(project, part, i, n) {
   const zip = new JSZip();
-  part.forEach(b => zip.file(`${pad(b.no)}_${safe(b.name)}`, b.blob));
+  part.forEach(b => zip.file(`${pad(b.no)}_${safe(b.name)}`, b.data || b.blob));
   zip.file('summary.csv', buildCsv(part));
-  const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
+  const zipBlob = await stage('Zipping', zip.generateAsync({ type: 'blob', compression: 'STORE' }));
   const total = part.reduce((s, b) => s + (b.amount || 0), 0);
   const subject = `${project.name} mail ${i} of ${n}`;
   const text = [`Project: ${project.name}`, `Email ${i} of ${n}`,
@@ -261,11 +267,11 @@ async function sendPart(project, part, i, n) {
     ...part.map(b => `${b.no}. ${b.name} | ${b.date}${b.amount != null ? ' | ' + inr(b.amount) : ''}${b.note ? ' | ' + b.note : ''}`),
     '', 'A summary.csv is included in the attached zip.'].filter((l, k, a) => l !== '' || a[k - 1] !== '').join('\n');
   const zipName = `${safe(project.name).replace(/ /g, '_')}_mail${i}of${n}.zip`;
-  const mime = await buildMime({ subject, text, zipName, zipBlob });
-  const token = await getToken();
-  const r = await fetch('https://www.googleapis.com/upload/gmail/v1/users/me/messages/send?uploadType=media', {
+  const mime = await stage('Building email', buildMime({ subject, text, zipName, zipBlob }));
+  const token = await stage('Google sign-in', getToken());
+  const r = await stage('Sending', fetch('https://www.googleapis.com/upload/gmail/v1/users/me/messages/send?uploadType=media', {
     method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'message/rfc822' }, body: mime
-  });
+  }));
   if (!r.ok) {
     if (r.status === 401) accessToken = null;
     let m = ''; try { m = (await r.json()).error.message; } catch (e) {}
