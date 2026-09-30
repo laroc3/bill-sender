@@ -59,7 +59,7 @@ async function render() {
 }
 
 async function renderList() {
-  $('#title').textContent = 'Bill Sender';
+  $('#title').textContent = 'Bishnu\'s Bill Sender';
   const [projects, bills] = await Promise.all([getAll('projects'), getAll('bills')]);
   projects.sort((a, b) => b.created - a.created);
   const by = {};
